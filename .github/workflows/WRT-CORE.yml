@@ -307,9 +307,9 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: apk-packages-${{ env.WRT_CONFIG }}-${{ env.WRT_PROFILE }}
-            path: |
+          path: |
               ./wrt/bin/packages/
-           if-no-files-found: warn
+          if-no-files-found: warn
 
       - name: Build Summary
         run: |
