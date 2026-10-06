@@ -269,6 +269,13 @@ jobs:
           echo "======================="
           du -h --max-depth=1
           echo "======================="
+          
+      - name: Collect Kmod Packages
+        if: env.WRT_TEST != 'true'
+        run: |
+          cd ./wrt/
+          mkdir -p ./kmod-packages/
+          find ./bin/targets/ -type d -name packages -exec cp -a {}/. ./kmod-packages/ \;
 
       - name: Package Firmware
         run: |
@@ -308,7 +315,7 @@ jobs:
           name: apk-packages-${{ env.WRT_CONFIG }}-${{ env.WRT_PROFILE }}
           path: |
               ./wrt/bin/packages/
-              ./wrt/bin/targets/**/packages/
+              ./wrt/kmod-packages/
           if-no-files-found: warn
 
       - name: Build Summary
