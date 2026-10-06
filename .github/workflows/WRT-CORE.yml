@@ -308,6 +308,7 @@ jobs:
           name: apk-packages-${{ env.WRT_CONFIG }}-${{ env.WRT_PROFILE }}
           path: |
               ./wrt/bin/packages/
+              ./wrt/bin/targets/**/packages/
           if-no-files-found: warn
 
       - name: Build Summary
