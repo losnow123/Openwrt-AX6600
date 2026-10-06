@@ -299,7 +299,7 @@ jobs:
             # 对最终命名后的固件生成校验文件，供用户刷机前验证下载完整性；失败不阻塞发布
             (cd ./upload/ && sha256sum *.bin > sha256sums.txt) || true
 
-            #make clean -j$(nproc)
+            # make clean -j$(nproc)
           fi
 
       - name: Upload APK Packages
