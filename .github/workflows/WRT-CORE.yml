@@ -302,6 +302,15 @@ jobs:
             make clean -j$(nproc)
           fi
 
+      - name: Upload APK Packages
+        if: env.WRT_TEST != 'true'
+        uses: actions/upload-artifact@v4
+        with:
+          name: apk-packages-${{ env.WRT_CONFIG }}-${{ env.WRT_PROFILE }}
+            path: |
+              ./wrt/bin/packages/
+           if-no-files-found: warn
+
       - name: Build Summary
         run: |
           {
