@@ -251,11 +251,13 @@ jobs:
 
           make download -j$(nproc)
           
-       - name: Check Kernel Patch
-         if: env.WRT_TEST != 'true'
-         run: |
-           cd ./wrt/
-           make target/linux/prepare V=s
+      - name: Check Kernel Patch
+        if: env.WRT_TEST != 'true'
+        run: |
+          cd ./wrt/
+          make defconfig
+          make tools/install -j$(nproc)
+          make target/linux/prepare V=s
 
       - name: Compile Firmware
         if: env.WRT_TEST != 'true'
