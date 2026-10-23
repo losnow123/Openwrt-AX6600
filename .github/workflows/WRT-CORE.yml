@@ -219,6 +219,16 @@ jobs:
           fi
           #$GITHUB_WORKSPACE/Scripts/Handles.sh
 
+      - name: Apply BBRv3 Patch
+        run: |
+          cd ./wrt/
+          KVER=$(grep -oP '^KERNEL_PATCHVER:=\K[\d.]+' target/linux/qualcommax/Makefile)
+          echo "kernel: $KVER"
+          PATCH_SRC="$GITHUB_WORKSPACE/Patches/bbr3-$KVER.patch"
+          [ -f "$PATCH_SRC" ] || { echo "no BBRv3 patch for $KVER"; exit 1; }
+          mkdir -p target/linux/generic/hack-$KVER
+          cp "$PATCH_SRC" target/linux/generic/hack-$KVER/690-tcp-bbr3.patch
+
       - name: Custom Settings
         run: |
           cd ./wrt/
@@ -240,6 +250,12 @@ jobs:
           cd ./wrt/
 
           make download -j$(nproc)
+          
+       - name: Check Kernel Patch
+         if: env.WRT_TEST != 'true'
+         run: |
+           cd ./wrt/
+           make target/linux/prepare V=s
 
       - name: Compile Firmware
         if: env.WRT_TEST != 'true'
