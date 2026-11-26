@@ -14,6 +14,14 @@ apply_sed_to_matches() {
 	fi
 }
 
+escape_sed() {
+	local str="$1"
+	str="${str//\\/\\\\}"
+	str="${str//&/\\&}"
+	str="${str//\//\\/}"
+	printf '%s' "$str"
+}
+
 #移除luci-app-attendedsysupgrade
 apply_sed_to_matches "./feeds/luci/collections/" "Makefile" "/attendedsysupgrade/d"
 
@@ -22,7 +30,10 @@ apply_sed_to_matches "./feeds/luci/collections/" "Makefile" "/attendedsysupgrade
 #sed -i "s/luci-theme-.*$/luci-theme-bootstrap/g" $(find ./feeds/luci/collections/ -type f -name "Makefile")
 
 #修改immortalwrt.lan关联IP
-apply_sed_to_matches "./feeds/luci/modules/luci-mod-system/" "flash.js" "s/192\\.168\\.[0-9]*\\.[0-9]*/$WRT_IP/g"
+if [ -n "$WRT_IP" ]; then
+	SAFE_WRT_IP=$(escape_sed "$WRT_IP")
+	apply_sed_to_matches "./feeds/luci/modules/luci-mod-system/" "flash.js" "s/192\\.168\\.[0-9]*\\.[0-9]*/$SAFE_WRT_IP/g"
+fi
 #添加编译日期标识
 apply_sed_to_matches "./feeds/luci/modules/luci-mod-status/" "10_system.js" "s/(\\(luciversion || ''\\))/(\\1) + (' \\/ $WRT_MARK-$WRT_DATE')/g"
 
@@ -33,14 +44,6 @@ apply_sed_to_matches "./feeds/luci/modules/luci-mod-status/" "10_system.js" "s/(
 # =========================================================
 TARGET_SSID="${WRT_SSID:-OWRT}"
 TARGET_WORD="${WRT_WORD:-12345678}"
-
-escape_sed() {
-	local str="$1"
-	str="${str//\\/\\\\}"
-	str="${str//&/\\&}"
-	str="${str//\//\\/}"
-	printf '%s' "$str"
-}
 
 escape_ucode_str() {
 	local str="$1"
@@ -280,8 +283,115 @@ EOF_FSTRIM_UCI
 chmod +x "$DEFAULT_FSTRIM_SCRIPT"
 
 # =========================================================
+# DoH 加密 DNS 代理初始化（待命模式）：
+# 1. 源码层原生置换：扫描并重写 ./package 与 ./feeds 下的 https-dns-proxy.config 与 https-dns-proxy.conf
+# 2. 源码层 init 脚本加固：离线构建期阻断 prepare_rootfs 生成开机自启软链接，杜绝 SquashFS ROM 天生携带自启链接
+# 3. 严格保护 sysupgrade 保留配置升级场景：只要既有配置存在，100% 保持用户配置与启停状态，绝不篡改重写
+# 4. 注入 uci-defaults 脚本 (97-default-https-dns-proxy)：仅在全新出厂刷机且无配置文件时预置国内合规待命模板 (DNSPod/AliDNS)
+# =========================================================
+
+# 1. 源码层原生置换配置文件模板 (Source-Level Native Template Patching)：
+# 扫描并直接重写 ./package 与 ./feeds 下的 https-dns-proxy.config 与 https-dns-proxy.conf，
+# 将纯净的国内合规待命模板预置到源码树，切断 upstream 海外节点与 53 端口强制劫持污染。
+HDP_SOURCE_FILES=$(find ./package ./feeds -type f \( -name "https-dns-proxy.config" -o -name "https-dns-proxy.conf" \) 2>/dev/null || true)
+if [ -n "$HDP_SOURCE_FILES" ]; then
+	while IFS= read -r hdp_tpl; do
+		[ -n "$hdp_tpl" ] || continue
+		cat << 'EOF_HDP_SRC' > "$hdp_tpl"
+config main 'config'
+	option dnsmasq_config_update '*'
+	option force_dns '0'
+
+config https-dns-proxy 'dnspod'
+	option bootstrap_dns '119.29.29.29,223.5.5.5'
+	option resolver_url 'https://doh.pub/dns-query'
+	option listen_addr '127.0.0.1'
+	option listen_port '5053'
+
+config https-dns-proxy 'alidns'
+	option bootstrap_dns '223.5.5.5,119.29.29.29'
+	option resolver_url 'https://dns.alidns.com/dns-query'
+	option listen_addr '127.0.0.1'
+	option listen_port '5054'
+EOF_HDP_SRC
+	done <<< "$HDP_SOURCE_FILES"
+fi
+
+# 2. 源码层 init 脚本启动策略加固 (Source-Level Init Service Patching)：
+# 针对离线 rootfs 构建阶段 (IPKG_INSTROOT 非空)，将 START/STOP 置空，彻底阻断 OpenWrt prepare_rootfs 自动生成自启软链接；
+# 在路由器运行期 (IPKG_INSTROOT 为空)，START=80 / STOP=10 正常生效，保障用户在 Web 页面按需启用/禁用功能完全正常。
+HDP_INIT_FILES=$(find ./package ./feeds -type f -name "https-dns-proxy.init" 2>/dev/null || true)
+if [ -n "$HDP_INIT_FILES" ]; then
+	while IFS= read -r hdp_init; do
+		[ -n "$hdp_init" ] || continue
+		if ! grep -q "IPKG_INSTROOT" "$hdp_init" 2>/dev/null; then
+			sed -i -E 's/^[[:space:]]*START=([0-9]+)/[ -n "$IPKG_INSTROOT" ] \&\& START="" || START=\1/' "$hdp_init"
+			sed -i -E 's/^[[:space:]]*STOP=([0-9]+)/[ -n "$IPKG_INSTROOT" ] \&\& STOP="" || STOP=\1/' "$hdp_init"
+		fi
+	done <<< "$HDP_INIT_FILES"
+fi
+
+DEFAULT_HDP_SCRIPT="$WIFI_DEFAULTS_DIR/97-default-https-dns-proxy"
+cat << 'EOF_HDP_UCI' > "$DEFAULT_HDP_SCRIPT"
+#!/bin/sh
+# 97-default-https-dns-proxy: Athena AX6600 (JDCloud RE-CS-02) Standby DoH Configuration
+
+SYS_PREFIX="${IPKG_INSTROOT:-${SIM_ROOT:-}}"
+
+# 1. 在 rootfs 构建期 (IPKG_INSTROOT)：
+# 清理构建期残留自启软链接，退出非 0 状态阻断构建阶段提前删除本脚本，确保随 rootfs 下发并在目标机首次开机时执行。
+if [ -n "$IPKG_INSTROOT" ]; then
+	rm -f "$IPKG_INSTROOT/etc/rc.d/"*https-dns-proxy 2>/dev/null || true
+	exit 1
+fi
+
+CFG_FILE="$SYS_PREFIX/etc/config/https-dns-proxy"
+INIT_FILE="$SYS_PREFIX/etc/init.d/https-dns-proxy"
+
+# 2. 检查是否为保留配置升级 (sysupgrade) 或用户既有配置：
+# 存在即信任原则 (Trust Existing Configuration)：
+# 只要既有配置文件存在且非空，100% 认定为合法用户配置或保留升级资产，
+# 立即静默退出 (exit 0)，绝对不进行任何启发式扫描，绝对不篡改重写，绝对不触碰服务状态！
+if [ -s "$CFG_FILE" ]; then
+	exit 0
+fi
+
+# 3. 仅在全新刷机 / 出厂初始化（配置文件完全不存在或为空）时，预置国内待命模板并确保禁用状态：
+# a. 确保服务开机默认处于禁用状态（待命模式），绝不默认接管 dnsmasq 上游与劫持 53 端口
+if [ -x "$INIT_FILE" ]; then
+	"$INIT_FILE" stop 2>/dev/null || true
+	"$INIT_FILE" disable 2>/dev/null || true
+fi
+rm -f "$SYS_PREFIX/etc/rc.d/"*https-dns-proxy 2>/dev/null || true
+
+# b. 写入国内合规且防端口劫持死锁的优质 DoH 模板（默认不开启）
+mkdir -p "$SYS_PREFIX/etc/config"
+cat << 'EOF_HDP' > "$CFG_FILE"
+config main 'config'
+	option dnsmasq_config_update '*'
+	option force_dns '0'
+
+config https-dns-proxy 'dnspod'
+	option bootstrap_dns '119.29.29.29,223.5.5.5'
+	option resolver_url 'https://doh.pub/dns-query'
+	option listen_addr '127.0.0.1'
+	option listen_port '5053'
+
+config https-dns-proxy 'alidns'
+	option bootstrap_dns '223.5.5.5,119.29.29.29'
+	option resolver_url 'https://dns.alidns.com/dns-query'
+	option listen_addr '127.0.0.1'
+	option listen_port '5054'
+EOF_HDP
+
+exit 0
+EOF_HDP_UCI
+chmod +x "$DEFAULT_HDP_SCRIPT"
+
+# =========================================================
 # 系统升级与资产保护：预置 keep.d 白名单，防止保留配置升级时静默丢失应用级非 UCI 用户资产
 # 覆盖关键资产：/etc/docker/daemon.json, /etc/adguardhome.yaml, /root/.ssh/
+# 架构底线：严禁在 keep.d 中加入 /etc/rc.d/ 系统服务软链接，彻底杜绝保留配置升级引发的 procd 启动队列竞争与状态失控
 # =========================================================
 KEEP_DIR="./package/base-files/files/lib/upgrade/keep.d"
 mkdir -p "$KEEP_DIR"
@@ -297,9 +407,15 @@ chmod 644 "$CUSTOM_KEEP_FILE"
 CFG_FILE="./package/base-files/files/bin/config_generate"
 if [ -f "$CFG_FILE" ]; then
 	#修改默认IP地址
-	sed -i "s/192\.168\.[0-9]*\.[0-9]*/$WRT_IP/g" "$CFG_FILE"
+	if [ -n "$WRT_IP" ]; then
+		SAFE_WRT_IP=$(escape_sed "$WRT_IP")
+		sed -i "s/192\.168\.[0-9]*\.[0-9]*/$SAFE_WRT_IP/g" "$CFG_FILE"
+	fi
 	#修改默认主机名
-	sed -i "s/hostname='.*'/hostname='$WRT_NAME'/g" "$CFG_FILE"
+	if [ -n "$WRT_NAME" ]; then
+		SAFE_WRT_NAME=$(escape_sed "$WRT_NAME")
+		sed -i "s/hostname='.*'/hostname='$SAFE_WRT_NAME'/g" "$CFG_FILE"
+	fi
 fi
 
 #配置文件修改

@@ -313,7 +313,12 @@ for asset in "${REQUIRED_KEEP_ASSETS[@]}"; do
         exit 1
     fi
 done
-echo "PASS: Settings.sh generates valid 99-ax6600-custom declaring all non-UCI user assets."
+
+if grep -q "rc.d" "$CUSTOM_KEEP_PATH"; then
+    echo "FAIL: $CUSTOM_KEEP_PATH must NOT contain /etc/rc.d/ service symlinks!" >&2
+    exit 1
+fi
+echo "PASS: Settings.sh generates valid 99-ax6600-custom declaring all non-UCI user assets and strictly excluding system service symlinks."
 
 # -----------------------------------------------------------------------------
 # Test 7: 修复后验收：验证预置 99-ax6600-custom 下 sysupgrade 能够无缝保留全部非 UCI 资产
@@ -333,22 +338,31 @@ FIXED_BACKUP_LIST="$TMP_DIR/test7_fixed_backup.list"
         [ -z "$pattern" ] && continue
         [[ "$pattern" =~ ^# ]] && continue
         rel="${pattern#/}"
-        if [ -d "$rel" ]; then
-            find "$rel" -type f -o -type l >> "$FIXED_BACKUP_LIST"
-        elif [ -e "$rel" ] || [ -L "$rel" ]; then
-            echo "$rel" >> "$FIXED_BACKUP_LIST"
-        fi
+        for f in $rel; do
+            if [ -d "$f" ]; then
+                find "$f" -type f -o -type l >> "$FIXED_BACKUP_LIST"
+            elif [ -e "$f" ] || [ -L "$f" ]; then
+                echo "$f" >> "$FIXED_BACKUP_LIST"
+            fi
+        done
     done < <(cat "$TEST5_ROOT"/lib/upgrade/keep.d/* 2>/dev/null)
     find etc/config -type f >> "$FIXED_BACKUP_LIST"
+    sort -u -o "$FIXED_BACKUP_LIST" "$FIXED_BACKUP_LIST"
 )
 
-# 验证清单中包含所有目标非 UCI 资产（含 SSH 符号链接）
+# 验证清单中包含所有目标非 UCI 资产（含 SSH 符号链接），且去重后无重复条目
 for asset in "etc/docker/daemon.json" "etc/adguardhome.yaml" "root/.ssh/authorized_keys" "root/.ssh/authorized_keys2"; do
     if ! grep -Fxq "$asset" "$FIXED_BACKUP_LIST"; then
         echo "FAIL: Fixed backup list missing $asset!" >&2
         exit 1
     fi
 done
+
+# 断言：清单中绝对不能包含 /etc/rc.d/ 系统启动软链接
+if grep -q "rc\.d" "$FIXED_BACKUP_LIST"; then
+    echo "FAIL: /etc/rc.d/ symlinks were unexpectedly included in backup list!" >&2
+    exit 1
+fi
 
 # 模拟真实 sysupgrade 打包与恢复
 FIXED_RESTORE_DIR="$TMP_DIR/test7_restore"
@@ -396,12 +410,15 @@ TOLERANCE_LIST="$TMP_DIR/test7_tolerance.list"
         [ -z "$pattern" ] && continue
         [[ "$pattern" =~ ^# ]] && continue
         rel="${pattern#/}"
-        if [ -d "$rel" ]; then
-            find "$rel" -type f -o -type l >> "$TOLERANCE_LIST"
-        elif [ -e "$rel" ] || [ -L "$rel" ]; then
-            echo "$rel" >> "$TOLERANCE_LIST"
-        fi
+        for f in $rel; do
+            if [ -d "$f" ]; then
+                find "$f" -type f -o -type l >> "$TOLERANCE_LIST"
+            elif [ -e "$f" ] || [ -L "$f" ]; then
+                echo "$f" >> "$TOLERANCE_LIST"
+            fi
+        done
     done < <(cat "$TEST5_ROOT"/lib/upgrade/keep.d/* 2>/dev/null)
+    sort -u -o "$TOLERANCE_LIST" "$TOLERANCE_LIST"
 )
 if ! grep -Fxq "etc/docker/daemon.json" "$TOLERANCE_LIST" || ! grep -Fxq "root/.ssh/authorized_keys" "$TOLERANCE_LIST"; then
     echo "FAIL: Missing optional file caused backup collection to skip other valid assets!" >&2
